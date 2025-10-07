@@ -319,7 +319,6 @@ def check_answer(prompts, completions, answer, **kwargs):
         else:
             scores.append(-3.0)
     
-    scores.append(score)
     return scores
 
 global PRINTED_TIMES
@@ -392,7 +391,7 @@ training_args = GRPOConfig(
 grpo_trainer = GRPOTrainer(
     model=model,
     processing_class=tokenizer,
-    config=training_args,
+    args=training_args,  # FIXED: Changed from 'config' to 'args'
     train_dataset=grpo_dataset,
     reward_funcs=[
         match_format_exactly,
