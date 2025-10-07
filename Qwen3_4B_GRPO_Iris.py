@@ -391,7 +391,7 @@ training_args = GRPOConfig(
 grpo_trainer = GRPOTrainer(
     model=model,
     processing_class=tokenizer,
-    args=training_args,  # FIXED: Changed from 'config' to 'args'
+    args=training_args,
     train_dataset=grpo_dataset,
     reward_funcs=[
         match_format_exactly,
@@ -446,8 +446,127 @@ Petal Width: {example['petal_width']} cm"""
     )
 
 # ============================================================================
-# STEP 11: Save the Model
+# STEP 11: Save the Model (HuggingFace Format)
 # ============================================================================
 model.save_pretrained("iris_reasoning_model")
 tokenizer.save_pretrained("iris_reasoning_model")
 print("\n✓ Model saved to 'iris_reasoning_model'")
+
+# ============================================================================
+# STEP 12: Export to GGUF Format for LM Studio
+# ============================================================================
+print("\n" + "="*50)
+print("Exporting to GGUF format for LM Studio...")
+print("="*50)
+
+# Quantization options:
+# - "f16" or "f32": Full precision (largest file, best quality)
+# - "q8_0": 8-bit quantization (good balance)
+# - "q5_k_m": 5-bit quantization (smaller, still good quality)
+# - "q4_k_m": 4-bit quantization (smallest file, faster inference)
+
+# Export full precision version (F16)
+print("\n[1/3] Exporting F16 (full precision)...")
+model.save_pretrained_gguf(
+    "iris_reasoning_gguf_f16",
+    tokenizer,
+    quantization_method="f16"
+)
+print("✓ F16 version saved to 'iris_reasoning_gguf_f16' folder")
+
+# Export 8-bit quantized version (recommended balance)
+print("\n[2/3] Exporting Q8_0 (8-bit quantization)...")
+model.save_pretrained_gguf(
+    "iris_reasoning_gguf_q8",
+    tokenizer,
+    quantization_method="q8_0"
+)
+print("✓ Q8_0 version saved to 'iris_reasoning_gguf_q8' folder")
+
+# Export 4-bit quantized version (smallest, fastest)
+print("\n[3/3] Exporting Q4_K_M (4-bit quantization)...")
+model.save_pretrained_gguf(
+    "iris_reasoning_gguf_q4",
+    tokenizer,
+    quantization_method="q4_k_m"
+)
+print("✓ Q4_K_M version saved to 'iris_reasoning_gguf_q4' folder")
+
+print("\n" + "="*50)
+print("✓ All GGUF exports completed!")
+print("="*50)
+print("\nGGUF files created:")
+print("  1. iris_reasoning_gguf_f16/  (Full precision - best quality)")
+print("  2. iris_reasoning_gguf_q8/   (8-bit - recommended)")
+print("  3. iris_reasoning_gguf_q4/   (4-bit - smallest/fastest)")
+print("\nTo download from Colab, run:")
+print("  from google.colab import files")
+print("  files.download('iris_reasoning_gguf_q8/iris_reasoning_model-unsloth.Q8_0.gguf')")
+
+# ============================================================================
+# STEP 13: Download GGUF files (if running on Colab)
+# ============================================================================
+try:
+    from google.colab import files
+    print("\n" + "="*50)
+    print("Detected Google Colab - Downloading GGUF files...")
+    print("="*50)
+    
+    import os
+    
+    # Download Q8 version (recommended)
+    q8_files = [f for f in os.listdir("iris_reasoning_gguf_q8") if f.endswith('.gguf')]
+    if q8_files:
+        print(f"\nDownloading recommended version (Q8): {q8_files[0]}")
+        files.download(f"iris_reasoning_gguf_q8/{q8_files[0]}")
+    
+    # Optionally download other versions
+    download_all = input("\nDownload all versions? (y/n): ").lower()
+    if download_all == 'y':
+        # Download F16 version
+        f16_files = [f for f in os.listdir("iris_reasoning_gguf_f16") if f.endswith('.gguf')]
+        if f16_files:
+            print(f"\nDownloading F16 version: {f16_files[0]}")
+            files.download(f"iris_reasoning_gguf_f16/{f16_files[0]}")
+        
+        # Download Q4 version
+        q4_files = [f for f in os.listdir("iris_reasoning_gguf_q4") if f.endswith('.gguf')]
+        if q4_files:
+            print(f"\nDownloading Q4 version: {q4_files[0]}")
+            files.download(f"iris_reasoning_gguf_q4/{q4_files[0]}")
+    
+    print("\n✓ Download complete!")
+    
+except ImportError:
+    print("\nNot running on Colab - files saved locally.")
+    print("You can find the GGUF files in the folders listed above.")
+
+print("\n" + "="*50)
+print("SETUP INSTRUCTIONS FOR LM STUDIO")
+print("="*50)
+print("""
+1. Open LM Studio
+2. Click 'Local Models' (folder icon on left)
+3. Click '+' button or 'Import Model'
+4. Select the downloaded .gguf file
+5. Go to 'Chat' tab and select your model
+
+6. IMPORTANT: Set the System Prompt in LM Studio:
+   Click Settings (gear icon) → System Prompt:
+   
+   You are a botanist analyzing iris flowers.
+   Given measurements of an iris flower, analyze the features carefully.
+   Place your reasoning between <start_working_out> and <end_working_out>.
+   Then, provide the species name between <SOLUTION></SOLUTION>
+   The species must be one of: setosa, versicolor, or virginica
+
+7. Test with this prompt:
+   
+   Classify this iris flower:
+   Sepal Length: 5.1 cm
+   Sepal Width: 3.5 cm
+   Petal Length: 1.4 cm
+   Petal Width: 0.2 cm
+
+Enjoy your custom reasoning model! 🎉
+""")
