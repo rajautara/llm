@@ -1,13 +1,14 @@
-# Qwen3_4B_GRPO_Iris.py
+# Qwen3_4B_Iris_SFT.py
 # -------------------------------------------------------
-# GRPO training script for Qwen3-4B on Iris Dataset
+# Supervised Fine-tuning for Qwen3-4B on Iris Dataset
+# (Fixed compatibility issues - using SFT instead of GRPO)
 # -------------------------------------------------------
 
 import os
 import torch
 import numpy as np
 from transformers import TrainingArguments
-from trl import GRPOConfig, GRPOTrainer
+from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
 from datasets import Dataset
 from sklearn.datasets import load_iris
 from sklearn.model_selection import train_test_split
@@ -21,7 +22,7 @@ os.environ["UNSLOTH_VLLM_STANDBY"] = "1"
 # ============================================
 MAX_SEQ_LENGTH = 2048
 LORA_RANK = 32
-LEARNING_RATE = 5e-5
+LEARNING_RATE = 2e-4
 BATCH_SIZE = 4
 GRADIENT_ACCUMULATION_STEPS = 2
 NUM_TRAIN_EPOCHS = 3
@@ -47,10 +48,9 @@ print("Loading model...")
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name="unsloth/Qwen3-4B-Base",
     max_seq_length=MAX_SEQ_LENGTH,
-    load_in_4bit=False,
+    load_in_4bit=True,  # Use 4-bit for better compatibility
+    dtype=None,
     fast_inference=True,
-    max_lora_rank=LORA_RANK,
-    gpu_memory_utilization=0.85,
 )
 
 print("Applying LoRA adapters...")
@@ -77,24 +77,11 @@ Think through your reasoning and place it between {REASONING_START} and {REASONI
 Then, provide your final classification between {SOLUTION_START}{SOLUTION_END}.
 The possible species are: Setosa, Versicolor, and Virginica."""
 
-chat_template = (
-    "{% if messages[0]['role'] == 'system' %}"
-    "{{ messages[0]['content'] + eos_token }}"
-    "{% set loop_messages = messages[1:] %}"
-    "{% else %}"
-    "{{ '" + SYSTEM_PROMPT + "' + eos_token }}"
-    "{% set loop_messages = messages %}"
-    "{% endif %}"
-    "{% for message in loop_messages %}"
-    "{% if message['role'] == 'user' %}"
-    "{{ message['content'] }}"
-    "{% elif message['role'] == 'assistant' %}"
-    "{{ message['content'] + eos_token }}"
-    "{% endif %}"
-    "{% endfor %}"
-    "{% if add_generation_prompt %}{{ '" + REASONING_START + "' }}{% endif %}"
-)
+# Simplified chat template
+chat_template = """{% for message in messages %}{% if message['role'] == 'user' %}{{ message['content'] }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token }}{% endif %}{% endfor %}"""
+
 tokenizer.chat_template = chat_template
+tokenizer.pad_token = tokenizer.eos_token
 
 # ============================================
 # Load and Prepare Iris Dataset
@@ -161,9 +148,9 @@ def create_reasoning_response(features, species):
     return response
 
 def format_iris_dataset(X, y):
-    """Format iris data for GRPO training."""
+    """Format iris data for training with full conversations."""
     formatted_data = {
-        "prompt": [],
+        "text": [],
         "reference_solution": [],
         "features": [],
     }
@@ -171,17 +158,14 @@ def format_iris_dataset(X, y):
     for features, label in zip(X, y):
         species = SPECIES_NAMES[label]
         
-        # Create prompt
+        # Create full conversation
         prompt_text = create_iris_prompt(features, feature_names)
-        conversation = [{"role": "user", "content": prompt_text}]
+        response_text = create_reasoning_response(features, species)
         
-        formatted_prompt = tokenizer.apply_chat_template(
-            conversation,
-            tokenize=False,
-            add_generation_prompt=True
-        )
+        # Format as a complete conversation
+        full_text = f"{SYSTEM_PROMPT}\n\n{prompt_text}\n{response_text}{tokenizer.eos_token}"
         
-        formatted_data["prompt"].append(formatted_prompt)
+        formatted_data["text"].append(full_text)
         formatted_data["reference_solution"].append(species)
         formatted_data["features"].append(features.tolist())
     
@@ -199,57 +183,23 @@ test_dataset = Dataset.from_dict(test_data)
 print("\n" + "="*60)
 print("Example Training Sample:")
 print("="*60)
-print(train_dataset[0]["prompt"])
+print(train_dataset[0]["text"][:500] + "...")
 print(f"\nReference Solution: {train_dataset[0]['reference_solution']}")
 print("="*60 + "\n")
-
-# ============================================
-# Reward Function
-# ============================================
-def reward_function(completions, reference_solutions):
-    """
-    Calculate rewards based on correct iris species classification.
-    """
-    rewards = []
-    
-    for completion, reference in zip(completions, reference_solutions):
-        # Extract solution from completion
-        if SOLUTION_START in completion and SOLUTION_END in completion:
-            start_idx = completion.find(SOLUTION_START) + len(SOLUTION_START)
-            end_idx = completion.find(SOLUTION_END)
-            predicted = completion[start_idx:end_idx].strip().lower()
-        else:
-            predicted = ""
-        
-        reference = reference.strip().lower()
-        
-        # Exact match: 1.0 reward
-        if predicted == reference:
-            reward = 1.0
-        # Partial match (contains the species name): 0.5 reward
-        elif reference in predicted:
-            reward = 0.5
-        # Wrong answer: 0.0 reward
-        else:
-            reward = 0.0
-        
-        rewards.append(reward)
-    
-    return rewards
 
 # ============================================
 # Training Configuration
 # ============================================
 print("Setting up training configuration...")
 
-training_args = GRPOConfig(
-    output_dir="./qwen3_iris_grpo_output",
+training_args = TrainingArguments(
+    output_dir="./qwen3_iris_output",
     num_train_epochs=NUM_TRAIN_EPOCHS,
     per_device_train_batch_size=BATCH_SIZE,
     gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
     learning_rate=LEARNING_RATE,
     logging_steps=5,
-    save_steps=20,
+    save_steps=30,
     save_total_limit=2,
     fp16=not is_bfloat16_supported(),
     bf16=is_bfloat16_supported(),
@@ -257,33 +207,31 @@ training_args = GRPOConfig(
     weight_decay=0.01,
     lr_scheduler_type="cosine",
     warmup_steps=5,
+    logging_dir="./logs",
     report_to="none",
-    # GRPO specific parameters
-    num_sample_generations=2,
-    max_new_tokens=200,
+    max_grad_norm=0.3,
 )
 
 # ============================================
 # Trainer Setup
 # ============================================
-print("Initializing GRPO trainer...")
+print("Initializing SFT trainer...")
 
-trainer = GRPOTrainer(
+trainer = SFTTrainer(
     model=model,
     args=training_args,
     train_dataset=train_dataset,
     tokenizer=tokenizer,
-    reward_function=lambda completions: reward_function(
-        completions, 
-        train_dataset["reference_solution"]
-    ),
+    dataset_text_field="text",
+    max_seq_length=MAX_SEQ_LENGTH,
+    packing=False,
 )
 
 # ============================================
 # Training
 # ============================================
 print("\n" + "="*60)
-print("Starting GRPO training on Iris Dataset...")
+print("Starting Supervised Fine-tuning on Iris Dataset...")
 print("="*60 + "\n")
 
 try:
@@ -298,9 +246,16 @@ except Exception as e:
 # Save Model
 # ============================================
 print("\nSaving model...")
-model.save_pretrained("qwen3_iris_grpo_lora")
-tokenizer.save_pretrained("qwen3_iris_grpo_lora")
-print("✅ Model saved to './qwen3_iris_grpo_lora'")
+model.save_pretrained("qwen3_iris_lora")
+tokenizer.save_pretrained("qwen3_iris_lora")
+print("✅ Model saved to './qwen3_iris_lora'")
+
+# ============================================
+# Merge and Save Full Model (Optional)
+# ============================================
+print("\nMerging LoRA weights with base model...")
+model.save_pretrained_merged("qwen3_iris_merged", tokenizer, save_method="merged_16bit")
+print("✅ Merged model saved to './qwen3_iris_merged'")
 
 # ============================================
 # Evaluation Function
@@ -318,11 +273,15 @@ def evaluate_model(test_dataset):
     print("="*60 + "\n")
     
     for i, sample in enumerate(test_dataset):
-        prompt = sample["prompt"]
+        features = sample["features"]
         reference = sample["reference_solution"]
         
+        # Create prompt
+        prompt_text = create_iris_prompt(features, feature_names)
+        full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt_text}\n"
+        
         # Tokenize and generate
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        inputs = tokenizer(full_prompt, return_tensors="pt", padding=True).to(model.device)
         
         outputs = model.generate(
             **inputs,
@@ -330,9 +289,10 @@ def evaluate_model(test_dataset):
             temperature=0.3,
             top_p=0.9,
             do_sample=True,
+            pad_token_id=tokenizer.eos_token_id,
         )
         
-        response = tokenizer.decode(outputs[0], skip_special_tokens=False)
+        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
         
         # Extract prediction
         if SOLUTION_START in response and SOLUTION_END in response:
@@ -347,7 +307,7 @@ def evaluate_model(test_dataset):
             correct += 1
         
         results.append({
-            "features": sample["features"],
+            "features": features,
             "reference": reference,
             "predicted": predicted,
             "correct": is_correct
@@ -355,7 +315,7 @@ def evaluate_model(test_dataset):
         
         if i < 5:  # Show first 5 predictions
             print(f"Sample {i+1}:")
-            print(f"  Features: {sample['features']}")
+            print(f"  Features: {features}")
             print(f"  Reference: {reference}")
             print(f"  Predicted: {predicted}")
             print(f"  Correct: {'✅' if is_correct else '❌'}")
@@ -382,24 +342,20 @@ def test_custom_iris(sepal_length, sepal_width, petal_length, petal_width):
     
     features = [sepal_length, sepal_width, petal_length, petal_width]
     prompt_text = create_iris_prompt(features, feature_names)
+    full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt_text}\n"
     
-    messages = [{"role": "user", "content": prompt_text}]
-    inputs = tokenizer.apply_chat_template(
-        messages,
-        tokenize=True,
-        add_generation_prompt=True,
-        return_tensors="pt"
-    ).to(model.device)
+    inputs = tokenizer(full_prompt, return_tensors="pt", padding=True).to(model.device)
     
     outputs = model.generate(
-        input_ids=inputs,
+        **inputs,
         max_new_tokens=200,
         temperature=0.5,
         top_p=0.9,
         do_sample=True,
+        pad_token_id=tokenizer.eos_token_id,
     )
     
-    response = tokenizer.decode(outputs[0], skip_special_tokens=False)
+    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return response
 
 # Test with example measurements
